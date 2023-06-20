@@ -32,6 +32,8 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "format.h"
 #include "json.h"
 
+#define DISABLE_LED
+
 #ifndef NDEBUG
 #define DEBUG(...) Serial.print(__VA_ARGS__)
 #define DEBUGLN(...) Serial.println(__VA_ARGS__);
@@ -70,9 +72,7 @@ struct SensorData {
   SensorReading computeAvgAndReset(int samples);
 };
 
-bool SensorData::tryRead(int timeout) {
-  return pms.readUntil(data, timeout);
-}
+bool SensorData::tryRead(int timeout) { return pms.readUntil(data, timeout); }
 
 void SensorData::accumulate() {
   reading.pm01 += data.PM_AE_UG_1_0;
@@ -181,6 +181,9 @@ void loop() {
 }
 
 void setLED(boolean ledON) {
+#ifdef DISABLE_LED
+  ledON = false;
+#endif
   if (ledON) {
     digitalWrite(10, HIGH);
   } else {
@@ -194,26 +197,30 @@ void postToApi(const SensorReading &r0, const SensorReading &r1) {
   {
     auto root = json.object();
     root.addMember("wifi", WiFi.RSSI());
-    root.addMember("pm01", 0.5 * (r0.pm01 + r1.pm01));
-    root.addMember("pm02", 0.5 * (r0.pm02 + r1.pm02));
-    root.addMember("pm10", 0.5 * (r0.pm10 + r1.pm10));
-    root.addMember("pmCnt", 0.5 * (r0.pCnt + r1.pCnt));
-    root.addMember("atmp", 0.5 * (r0.temp + r1.temp));
-    root.addMember("rhum", 0.5 * (r0.rhum + r1.rhum));
+    root.addMember("pm01", 0.5 * (r0.pm01 + r1.pm01), 1);
+    root.addMember("pm02", 0.5 * (r0.pm02 + r1.pm02), 1);
+    root.addMember("pm10", 0.5 * (r0.pm10 + r1.pm10), 1);
+    root.addMember("pmCnt", 0.5 * (r0.pCnt + r1.pCnt), 1);
+    root.addMember("atmp", 0.5 * (r0.temp + r1.temp), 2);
+    root.addMember("rhum", 0.5 * (r0.rhum + r1.rhum), 2);
     {
       auto channels = root.addArrayMember("channels");
       for (auto &r : {r0, r1}) {
         auto channel = channels.pushObject();
-        root.addMember("pm01", r.pm01);
-        root.addMember("pm02", r.pm02);
-        root.addMember("pm10", r.pm10);
-        root.addMember("pmCnt", r.pCnt);
-        root.addMember("atmp", r.temp);
-        root.addMember("rhum", r.rhum);
+        channel.addMember("pm01", r.pm01, 1);
+        channel.addMember("pm02", r.pm02, 1);
+        channel.addMember("pm10", r.pm10, 1);
+        channel.addMember("pmCnt", r.pCnt, 1);
+        channel.addMember("atmp", r.temp, 2);
+        channel.addMember("rhum", r.rhum, 2);
       }
     }
   }
-  sendPayload(payload, json.formatter().peek() - payload);
+  if (json.formatter()) {
+    sendPayload(payload, json.formatter().peek() - payload);
+  } else {
+    DEBUGLN("Payload buffer overflow");
+  }
 }
 
 void sendPayload(const char *payload, std::size_t length) {
@@ -227,6 +234,7 @@ void sendPayload(const char *payload, std::size_t length) {
   client.setConnectTimeout(5 * 1000);
   client.begin(API_ENDPOINT);
   client.addHeader("content-type", "application/json");
+  // This function requiring a non-const pointer was not a good decision.
   int httpCode = client.POST((std::uint8_t *)payload, length);
   DEBUGLN(httpCode);
   client.end();
@@ -234,10 +242,9 @@ void sendPayload(const char *payload, std::size_t length) {
   setLED(false);
 }
 
-void countdown(int from) {
-  DEBUGLN();
-  while (from-- > 0) {
-    DEBUG(from);
+void countdown(int seconds) {
+  while (seconds-- > 0) {
+    DEBUG(seconds);
     DEBUG(" ");
     delay(1000);
   }

@@ -41,6 +41,7 @@ public:
 
   void push(int x);
   void push(double x);
+  void push(double x, int precision);
   void push(const char *s);
   void push(bool x);
   void push(std::nullptr_t);
@@ -65,6 +66,7 @@ public:
 
   void addMember(const char *key, int x);
   void addMember(const char *key, double x);
+  void addMember(const char *key, double x, int precision);
   void addMember(const char *key, const char *s);
   void addMember(const char *key, bool x);
   void addMember(const char *key, std::nullptr_t);

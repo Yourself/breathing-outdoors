@@ -3,11 +3,11 @@
 JsonFormatter::JsonFormatter(char *buf, std::size_t len) : f_(buf, len) {}
 
 JsonArray JsonFormatter::array() {
-  f_.append("{");
+  f_.append("[");
   return JsonArray(*this);
 }
 JsonObject JsonFormatter::object() {
-  f_.append("[");
+  f_.append("{");
   return JsonObject(*this);
 }
 
@@ -24,6 +24,11 @@ void JsonArray::push(int x) {
 void JsonArray::push(double x) {
   appendComma();
   json_.f_.append("%f", x);
+}
+
+void JsonArray::push(double x, int precision) {
+  appendComma();
+  json_.f_.append("%.*f", precision, x);
 }
 
 void JsonArray::push(const char *s) {
@@ -72,6 +77,11 @@ void JsonObject::addMember(const char *key, int x) {
 void JsonObject::addMember(const char *key, double x) {
   appendComma();
   json_.f_.append("\"%s\":%f", key, x);
+}
+
+void JsonObject::addMember(const char *key, double x, int precision) {
+  appendComma();
+  json_.f_.append("\"%s\":%.*f", key, precision, x);
 }
 
 void JsonObject::addMember(const char *key, const char *s) {
