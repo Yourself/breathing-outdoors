@@ -32,7 +32,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "format.h"
 #include "json.h"
 
-#define DISABLE_LED
+#define NDEBUG
 
 #ifndef NDEBUG
 #define DEBUG(...) Serial.print(__VA_ARGS__)
@@ -127,11 +127,9 @@ void setupApiEndpoint() {
 
 // select board LOLIN C3 mini to flash
 void setup() {
-#ifndef NDEBUG
   Serial.begin(115200);
   // see https://github.com/espressif/arduino-esp32/issues/6983
   Serial.setTxTimeoutMs(0); // <<<====== solves the delay issue
-#endif
 
   DEBUGLN("Starting ...");
 
@@ -181,14 +179,7 @@ void loop() {
 }
 
 void setLED(boolean ledON) {
-#ifdef DISABLE_LED
-  ledON = false;
-#endif
-  if (ledON) {
-    digitalWrite(10, HIGH);
-  } else {
-    digitalWrite(10, LOW);
-  }
+  digitalWrite(10, ledON ? HIGH : LOW);
 }
 
 void postToApi(const SensorReading &r0, const SensorReading &r1) {
@@ -229,7 +220,6 @@ void sendPayload(const char *payload, std::size_t length) {
     return;
   }
 
-  setLED(true);
   DEBUGLN(payload);
   client.setConnectTimeout(5 * 1000);
   client.begin(API_ENDPOINT);
@@ -239,7 +229,6 @@ void sendPayload(const char *payload, std::size_t length) {
   DEBUGLN(httpCode);
   client.end();
   resetWatchdog();
-  setLED(false);
 }
 
 void countdown(int seconds) {
