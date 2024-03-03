@@ -23,6 +23,8 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 
 */
 
+#define ARDUHAL_LOG_LEVEL 3
+
 #include <AirGradient.h>
 #include <HTTPClient.h>
 #include <HardwareSerial.h>
@@ -59,7 +61,7 @@ public:
       : period_(period), next_(0), handler_(handler), data_(data) {}
 
   void run() {
-    while (next_ <= millis()) {
+    if (next_ <= millis()) {
       handler_(data_);
       next_ += period_;
     }
@@ -159,7 +161,11 @@ public:
     DEBUG("S8Sensor ");
     DEBUGLN(active_ ? "active" : "inactive");
     if (active_) {
-      co2ppm_ += s8_->getCo2();
+      auto co2 = s8_->getCo2();
+      if (co2 == 0) {
+        return;
+      }
+      co2ppm_ += co2;
       ++samples_;
       DEBUG("  Samples: ");
       DEBUGLN(samples_);
@@ -197,12 +203,18 @@ public:
   bool begin(TwoWire &wire) { return active_ = sgp_->begin(wire); }
 
   void update() {
-    DEBUG("S8Sensor ");
+    DEBUG("SGPSensor ");
     DEBUGLN(active_ ? "active" : "inactive");
     if (active_) {
-      reading_.tvoc += sgp_->getTvocIndex();
-      reading_.tvocRaw += sgp_->getTvocRaw();
-      reading_.nox += sgp_->getNoxIndex();
+      int tvoc = sgp_->getTvocIndex();
+      int tvocRaw = sgp_->getTvocRaw();
+      int nox = sgp_->getNoxIndex();
+      if (tvoc < 0 || nox < 0) {
+        return;
+      }
+      reading_.tvoc += tvoc;
+      reading_.tvocRaw += tvocRaw;
+      reading_.nox += nox;
       ++samples_;
       DEBUG("  Samples: ");
       DEBUGLN(samples_);
@@ -340,7 +352,6 @@ template <class Fn> bool connectSerial(Fn &&fn) {
       ep.inUse = true;
       return true;
     }
-    ep.serial->end();
   }
   return false;
 }
@@ -373,8 +384,9 @@ void boardInit() {
   ag.button.begin();
   ag.statusLed.begin();
 
-  if (!connectSerial([&](HardwareSerial &s) { return s8Sensor.begin(s); })) {
+  if (!s8Sensor.begin(Serial1)) {
     Serial.println("CO2 sensor not found");
+    Serial1.end();
   }
   if (!sgpSensor.begin(Wire)) {
     Serial.println("SGP sensor not found");
