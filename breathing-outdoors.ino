@@ -34,7 +34,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "format.h"
 #include "json.h"
 
-// #define NDEBUG
+#define NDEBUG
 
 #ifndef NDEBUG
 #define DEBUG(...) Serial.print(__VA_ARGS__)
