@@ -23,7 +23,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 
 */
 
-#include "PMS.h"
+#include <AirGradient.h>
 #include <HTTPClient.h>
 #include <HardwareSerial.h>
 #include <WiFiManager.h>
@@ -32,7 +32,7 @@ CC BY-SA 4.0 Attribution-ShareAlike 4.0 International License
 #include "format.h"
 #include "json.h"
 
-#define NDEBUG
+// #define NDEBUG
 
 #ifndef NDEBUG
 #define DEBUG(...) Serial.print(__VA_ARGS__)
@@ -49,62 +49,301 @@ char API_ENDPOINT[128];
 char CHIP_ID[16] = "";
 
 HTTPClient client;
+AirGradient ag(OPEN_AIR_OUTDOOR);
 
-struct SensorReading {
+using Callback = void (*)(void *data);
+
+class Schedule {
+public:
+  Schedule(int period, Callback handler, void *data = nullptr)
+      : period_(period), next_(0), handler_(handler), data_(data) {}
+
+  void run() {
+    while (next_ <= millis()) {
+      handler_(data_);
+      next_ += period_;
+    }
+  }
+
+private:
+  unsigned long period_;
+  unsigned long next_;
+  Callback handler_;
+  void *data_;
+};
+
+struct PMSReading {
   float pm01 = 0;
   float pm02 = 0;
   float pm10 = 0;
   float pCnt = 0;
   float temp = 0;
   float rhum = 0;
+
+  PMSReading &operator+=(const PMSReading &other) {
+    pm01 += other.pm01;
+    pm02 += other.pm02;
+    pm10 += other.pm10;
+    pCnt += other.pCnt;
+    temp += other.temp;
+    rhum += other.rhum;
+    return *this;
+  }
+
+  PMSReading &operator/=(float s) {
+    pm01 /= s;
+    pm02 /= s;
+    pm10 /= s;
+    pCnt /= s;
+    temp /= s;
+    rhum /= s;
+    return *this;
+  }
 };
 
-struct SensorData {
-  explicit SensorData(Stream &stream) : pms(stream) {}
+class PMSensor {
+public:
+  explicit PMSensor(PMS5003T &pms)
+      : accum_{}, pms_(&pms), samples_(0), active_(false) {}
 
-  PMS pms;
-  PMS::DATA data;
+  bool active() const { return active_; }
+  bool begin(HardwareSerial &serial) { return active_ = pms_->begin(serial); }
 
-  SensorReading reading;
+  void update() {
+    DEBUG("PMSensor ");
+    DEBUG((size_t)(void *)this);
+    DEBUG(" ");
+    DEBUGLN(active_ ? "active" : "inactive");
+    if (!(active_ && pms_->readData())) {
+      return;
+    }
 
-  bool tryRead(int count);
-  void accumulate();
-  SensorReading computeAvgAndReset(int samples);
+    accum_.pCnt += pms_->getPm03ParticleCount();
+    accum_.pm01 += pms_->getPm01Ae();
+    accum_.pm02 += pms_->getPm25Ae();
+    accum_.pm10 += pms_->getPm10Ae();
+    accum_.temp += pms_->getRawTemperature();
+    accum_.rhum += pms_->getRawRelativeHumidity();
+    ++samples_;
+    DEBUG("  Samples: ");
+    DEBUGLN(samples_);
+  }
+
+  bool tryGetReading(PMSReading &out) {
+    if (samples_ <= 0) {
+      return false;
+    }
+    out = accum_;
+    out /= samples_;
+    accum_ = {};
+    samples_ = 0;
+    return true;
+  }
+
+private:
+  PMSReading accum_;
+  PMS5003T *pms_;
+  int samples_;
+  bool active_;
 };
 
-bool SensorData::tryRead(int timeout) { return pms.readUntil(data, timeout); }
+class S8Sensor {
+public:
+  explicit S8Sensor(S8 &s8)
+      : s8_(&s8), co2ppm_(-1), samples_(0), active_(false) {}
 
-void SensorData::accumulate() {
-  reading.pm01 += data.PM_AE_UG_1_0;
-  reading.pm02 += data.PM_AE_UG_2_5;
-  reading.pm10 += data.PM_AE_UG_10_0;
-  reading.pCnt += data.PM_RAW_0_3;
-  reading.temp += data.AMB_TMP / 10.0;
-  reading.rhum += data.AMB_HUM / 10.0;
+  bool active() const { return active_; }
+  bool begin(HardwareSerial &serial) { return active_ = s8_->begin(serial); }
+
+  void update() {
+    DEBUG("S8Sensor ");
+    DEBUGLN(active_ ? "active" : "inactive");
+    if (active_) {
+      co2ppm_ += s8_->getCo2();
+      ++samples_;
+      DEBUG("  Samples: ");
+      DEBUGLN(samples_);
+    }
+  }
+
+  bool tryGetReading(float &co2ppm) {
+    if (samples_ <= 0) {
+      return false;
+    }
+    co2ppm = co2ppm_ / samples_;
+    co2ppm_ = 0;
+    samples_ = 0;
+    return true;
+  }
+
+private:
+  S8 *s8_;
+  float co2ppm_;
+  int samples_;
+  bool active_;
+};
+
+struct SGPReading {
+  float tvoc = -1;
+  float tvocRaw = -1;
+  float nox = -1;
+};
+
+class SGPSensor {
+public:
+  explicit SGPSensor(Sgp41 &sgp) : sgp_(&sgp), samples_(0), active_(false) {}
+
+  bool active() const { return active_; }
+  bool begin(TwoWire &wire) { return active_ = sgp_->begin(wire); }
+
+  void update() {
+    DEBUG("S8Sensor ");
+    DEBUGLN(active_ ? "active" : "inactive");
+    if (active_) {
+      reading_.tvoc += sgp_->getTvocIndex();
+      reading_.tvocRaw += sgp_->getTvocRaw();
+      reading_.nox += sgp_->getNoxIndex();
+      ++samples_;
+      DEBUG("  Samples: ");
+      DEBUGLN(samples_);
+    }
+  }
+
+  bool tryGetReading(SGPReading &reading) {
+    if (samples_ <= 0) {
+      return false;
+    }
+    reading.tvoc = reading_.tvoc / samples_;
+    reading.tvocRaw = reading_.tvocRaw / samples_;
+    reading.nox = reading_.nox / samples_;
+    reading_ = {};
+    samples_ = 0;
+    return true;
+  }
+
+private:
+  SGPReading reading_;
+  Sgp41 *sgp_;
+  int samples_;
+  bool active_;
+};
+
+constexpr unsigned long s8UpdatePeriod_ms = 4000;
+constexpr unsigned long sgpUpdatePeriod_ms = 1000;
+constexpr unsigned long pmsUpdatePeriod_ms = 2000;
+constexpr unsigned long serverUpdatePeriod_ms = 60000;
+
+PMSensor pmSensors[] = {PMSensor(ag.pms5003t_1), PMSensor(ag.pms5003t_2)};
+S8Sensor s8Sensor(ag.s8);
+SGPSensor sgpSensor(ag.sgp41);
+
+void s8Update(void *) {
+  DEBUGLN("Updating S8");
+  s8Sensor.update();
 }
 
-SensorReading SensorData::computeAvgAndReset(int samples) {
-  auto ret = reading;
-  ret.pm01 /= samples;
-  ret.pm02 /= samples;
-  ret.pm10 /= samples;
-  ret.pCnt /= samples;
-  ret.temp /= samples;
-  ret.rhum /= samples;
-  reading = {};
-  return ret;
+void sgpUpdate(void *) {
+  DEBUGLN("Updating SGP");
+  sgpSensor.update();
 }
 
-SensorData sensors[] = {SensorData{Serial0}, SensorData{Serial1}};
+void pmUpdate(void *) {
+  DEBUGLN("Updating PMS");
+  for (auto &sensor : pmSensors) {
+    sensor.update();
+  }
+}
 
-int countPosition = 0;
-int targetCount = 20;
+template <class T, size_t N> size_t size(const T (&)[N]) noexcept { return N; }
 
-int loopCount = 0;
+void serverUpdate(void *) {
+  DEBUGLN("Sending server update...");
+  static char payload[512] = "";
+  bool hasData = false;
+  JsonFormatter json(payload);
+  {
+    auto root = json.object();
+    root.addMember("wifi", WiFi.RSSI());
+    float co2;
+    SGPReading sgpReading;
+    size_t pmsCount = 0;
+    PMSReading pmsAccum;
+    PMSReading pmsReadings[size(pmSensors)];
+    if (s8Sensor.tryGetReading(co2)) {
+      root.addMember("rco2", co2, 0);
+      hasData = true;
+    }
+    if (sgpSensor.tryGetReading(sgpReading)) {
+      root.addMember("tvoc", sgpReading.tvoc, 0);
+      root.addMember("tvocRaw", sgpReading.tvocRaw, 0);
+      root.addMember("nox", sgpReading.nox, 0);
+      hasData = true;
+    }
+    while (pmsCount < size(pmSensors) &&
+           pmSensors[pmsCount].tryGetReading(pmsReadings[pmsCount])) {
+      pmsAccum += pmsReadings[pmsCount];
 
-int sampleCount = 0;
+      ++pmsCount;
+    }
+    if (pmsCount > 0) {
+      hasData = true;
+      pmsAccum /= pmsCount;
+      root.addMember("pm01", pmsAccum.pm01, 1);
+      root.addMember("pm02", pmsAccum.pm02, 1);
+      root.addMember("pm10", pmsAccum.pm10, 1);
+      root.addMember("pCnt", pmsAccum.pCnt, 1);
+      root.addMember("atmp", pmsAccum.temp, 1);
+      root.addMember("rhum", pmsAccum.rhum, 1);
+      if (pmsCount > 1) {
+        auto channels = root.addArrayMember("channels");
+        for (size_t i = 0; i < pmsCount; ++i) {
+          auto channel = channels.pushObject();
+          channel.addMember("pm01", pmsReadings[i].pm01, 1);
+          channel.addMember("pm02", pmsReadings[i].pm02, 1);
+          channel.addMember("pm10", pmsReadings[i].pm10, 1);
+          channel.addMember("pCnt", pmsReadings[i].pCnt, 1);
+          channel.addMember("atmp", pmsReadings[i].temp, 1);
+          channel.addMember("rhum", pmsReadings[i].rhum, 1);
+        }
+      }
+    }
+  }
+  if (json.formatter()) {
+    *json.formatter().peek() = '\0';
+    DEBUGLN(payload);
+    if (hasData) {
+      sendPayload(payload, json.formatter().peek() - payload);
+    }
+  } else {
+    DEBUGLN("Payload buffer overflow");
+  }
+}
 
-void IRAM_ATTR isr() { DEBUGLN("pushed"); }
+Schedule schedules[] = {{s8UpdatePeriod_ms, &s8Update},
+                        {sgpUpdatePeriod_ms, &sgpUpdate},
+                        {pmsUpdatePeriod_ms, &pmUpdate},
+                        {serverUpdatePeriod_ms, &serverUpdate}};
+
+struct SerialEndpoint {
+  HardwareSerial *serial;
+  bool inUse;
+};
+
+SerialEndpoint serials[] = {{&Serial0, false}, {&Serial1, false}};
+
+template <class Fn> bool connectSerial(Fn &&fn) {
+  for (SerialEndpoint &ep : serials) {
+    if (ep.inUse) {
+      continue;
+    }
+    if (std::forward<Fn>(fn)(*ep.serial)) {
+      ep.inUse = true;
+      return true;
+    }
+    ep.serial->end();
+  }
+  return false;
+}
 
 void setupChipID() {
   std::uint8_t mac[6];
@@ -125,6 +364,32 @@ void setupApiEndpoint() {
   DEBUGLN(API_ENDPOINT);
 }
 
+void boardInit() {
+  if (!Wire.begin(ag.getI2cSdaPin(), ag.getI2cSclPin())) {
+    Serial.println("I2C initialization failed.");
+  }
+
+  ag.watchdog.begin();
+  ag.button.begin();
+  ag.statusLed.begin();
+
+  if (!connectSerial([&](HardwareSerial &s) { return s8Sensor.begin(s); })) {
+    Serial.println("CO2 sensor not found");
+  }
+  if (!sgpSensor.begin(Wire)) {
+    Serial.println("SGP sensor not found");
+  }
+  bool pmsFound = false;
+  for (auto &pmSensor : pmSensors) {
+    if (connectSerial([&](HardwareSerial &s) { return pmSensor.begin(s); })) {
+      pmsFound = true;
+    }
+  }
+  if (!pmsFound) {
+    Serial.println("PMS sensor not found");
+  }
+}
+
 // select board LOLIN C3 mini to flash
 void setup() {
   Serial.begin(115200);
@@ -136,81 +401,26 @@ void setup() {
   setupChipID();
   setupApiEndpoint();
 
-  // default hardware serial, PMS connector on the right side of the C3 mini on
-  // the Open Air
-  Serial0.begin(9600);
-
-  // second hardware serial, PMS connector on the left side of the C3 mini on
-  // the Open Air
-  Serial1.begin(9600, SERIAL_8N1, 0, 1);
-
-  // led
-  pinMode(10, OUTPUT);
-
-  // push button
-  pinMode(9, INPUT_PULLUP);
-  attachInterrupt(9, isr, FALLING);
-
-  pinMode(2, OUTPUT);
-  digitalWrite(2, LOW);
-
-  // give the PMSs some time to start
-  countdown(3);
+  boardInit();
 
   connectToWifi();
   setLED(false);
+  // give the PMSs some time to start
+  countdown(3);
 }
 
 void loop() {
-  if (WiFi.status() == WL_CONNECTED) {
-    if (sensors[0].tryRead(2000) && sensors[1].tryRead(2000)) {
-      sensors[0].accumulate();
-      sensors[1].accumulate();
-      sampleCount++;
-      if (sampleCount >= targetCount) {
-        postToApi(sensors[0].computeAvgAndReset(sampleCount),
-                  sensors[1].computeAvgAndReset(sampleCount));
-        sampleCount = 0;
-      }
-    }
+  for (auto &schedule : schedules) {
+    schedule.run();
   }
-
-  countdown(2);
+  delay(500);
 }
 
-void setLED(boolean ledON) {
-  digitalWrite(10, ledON ? HIGH : LOW);
-}
-
-void postToApi(const SensorReading &r0, const SensorReading &r1) {
-  static char payload[512] = "";
-  JsonFormatter json(payload);
-  {
-    auto root = json.object();
-    root.addMember("wifi", WiFi.RSSI());
-    root.addMember("pm01", 0.5 * (r0.pm01 + r1.pm01), 1);
-    root.addMember("pm02", 0.5 * (r0.pm02 + r1.pm02), 1);
-    root.addMember("pm10", 0.5 * (r0.pm10 + r1.pm10), 1);
-    root.addMember("pmCnt", 0.5 * (r0.pCnt + r1.pCnt), 1);
-    root.addMember("atmp", 0.5 * (r0.temp + r1.temp), 2);
-    root.addMember("rhum", 0.5 * (r0.rhum + r1.rhum), 2);
-    {
-      auto channels = root.addArrayMember("channels");
-      for (auto &r : {r0, r1}) {
-        auto channel = channels.pushObject();
-        channel.addMember("pm01", r.pm01, 1);
-        channel.addMember("pm02", r.pm02, 1);
-        channel.addMember("pm10", r.pm10, 1);
-        channel.addMember("pmCnt", r.pCnt, 1);
-        channel.addMember("atmp", r.temp, 2);
-        channel.addMember("rhum", r.rhum, 2);
-      }
-    }
-  }
-  if (json.formatter()) {
-    sendPayload(payload, json.formatter().peek() - payload);
+void setLED(boolean ledOn) {
+  if (ledOn) {
+    ag.statusLed.setOn();
   } else {
-    DEBUGLN("Payload buffer overflow");
+    ag.statusLed.setOff();
   }
 }
 
@@ -228,7 +438,7 @@ void sendPayload(const char *payload, std::size_t length) {
   int httpCode = client.POST((std::uint8_t *)payload, length);
   DEBUGLN(httpCode);
   client.end();
-  resetWatchdog();
+  ag.watchdog.reset();
 }
 
 void countdown(int seconds) {
@@ -238,12 +448,6 @@ void countdown(int seconds) {
     delay(1000);
   }
   DEBUGLN();
-}
-
-void resetWatchdog() {
-  digitalWrite(2, HIGH);
-  delay(20);
-  digitalWrite(2, LOW);
 }
 
 // Wifi Manager
